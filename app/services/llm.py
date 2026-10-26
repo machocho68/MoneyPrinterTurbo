@@ -1035,7 +1035,7 @@ def generate_terms(
             "the order of topics in the video script."
         )
         ordering_rule = (
-            "6. keep the terms in the same order as the script narration; "
+            "8. keep the terms in the same order as the script narration; "
             "earlier terms must describe earlier visual moments."
         )
         # 有序关键词模式下，示例数量要和 amount 保持一致，避免模型被固定
@@ -1069,6 +1069,8 @@ def generate_terms(
 3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
 4. the search terms must be related to the subject of the video.
 5. reply with english search terms only.
+6. if the subject or script is Japanese or any other non-English language, translate the visible meaning into concrete English keywords. Do not return Japanese, Chinese, or other non-English words.
+7. each term must name something a camera can see: a place, object, action, weather, or time of day. Avoid abstract words such as message, emotion, hope, quote, text, or feeling unless that thing is literally visible. Do not substitute an unrelated popular scene such as a neon city.
 {ordering_rule}
 
 ## Output Example:
@@ -1081,7 +1083,7 @@ def generate_terms(
 ### Video Script
 {video_script}
 
-Please note that you must use English for generating video search terms; Chinese is not accepted.
+Please note that you must use English for generating video search terms; Japanese, Chinese, and other languages are not accepted.
 """.strip()
 
     logger.info(f"subject: {video_subject}, match_script_order: {match_script_order}")
@@ -1130,6 +1132,93 @@ Please note that you must use English for generating video search terms; Chinese
 
     logger.success(f"completed: \n{search_terms}")
     return search_terms
+
+
+def ensure_english_stock_terms(
+    terms: List[str],
+    *,
+    video_subject: str,
+    video_script: str,
+    language: str = "",
+    app_config=None,
+) -> List[str]:
+    """Turn Japanese stock queries into concrete English keywords.
+
+    English terms and non-Japanese narration are returned unchanged. A failed
+    translation keeps any terms that are already English and drops the rest,
+    so Pixabay is not queried with Japanese text.
+    """
+    from app.services.japanese_support import (
+        narration_is_japanese,
+        term_has_cjk,
+        translate_japanese_search_terms_enabled,
+    )
+
+    cleaned_terms = [str(term).strip() for term in terms or [] if str(term).strip()]
+    if not translate_japanese_search_terms_enabled():
+        return cleaned_terms
+    if not narration_is_japanese(
+        language, video_subject, video_script, " ".join(cleaned_terms)
+    ):
+        return cleaned_terms
+    if not any(term_has_cjk(term) for term in cleaned_terms):
+        return cleaned_terms
+
+    prompt = f"""
+Translate stock-video search terms into concrete English keywords.
+
+Rules:
+1. Return only a JSON array of strings.
+2. Each item is 1-3 English words naming a visible place, object, action, weather, or time of day.
+3. Preserve the original order and do not add unrelated scenes.
+4. Do not use Japanese or Chinese in the output.
+5. Do not use abstract words such as message, emotion, hope, quote, or feeling.
+
+Subject: {video_subject}
+Script: {video_script}
+Terms: {json.dumps(cleaned_terms, ensure_ascii=False)}
+""".strip()
+    response = ""
+    try:
+        if app_config is None:
+            response = _generate_response(prompt)
+        else:
+            response = _generate_response(prompt, app_config=app_config)
+        if response.startswith("Error: "):
+            raise ValueError(response)
+        parsed = json.loads(_strip_code_fence(response))
+        if not isinstance(parsed, list):
+            parsed = _extract_embedded_json(response, "[")
+    except Exception as exc:
+        logger.warning(
+            "failed to translate Japanese stock search terms: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        parsed = []
+
+    translated = []
+    if isinstance(parsed, list):
+        for term in parsed:
+            if not isinstance(term, str):
+                continue
+            term = term.strip()
+            if term and not term_has_cjk(term):
+                translated.append(term)
+    if translated:
+        logger.info(f"translated Japanese stock search terms: {translated}")
+        return translated[: max(len(cleaned_terms), 1)]
+
+    english_terms = [term for term in cleaned_terms if not term_has_cjk(term)]
+    if english_terms:
+        logger.warning(
+            "Japanese stock-term translation failed; keeping English terms only: "
+            f"{english_terms}"
+        )
+    else:
+        logger.error(
+            "could not translate Japanese search terms into English stock keywords"
+        )
+    return english_terms
 
 
 # =============================================================================

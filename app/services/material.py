@@ -4,6 +4,7 @@ import io
 import math
 import os
 import random
+import re
 import tempfile
 import threading
 import time
@@ -22,6 +23,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.config import config
 from app.models.schema import ImageMotion, MaterialInfo, VideoAspect, VideoConcatMode
+from app.services import japanese_support
 from app.services import (
     infistar_video,
     material_cache,
@@ -446,6 +448,182 @@ def search_videos_pexels(
     return []
 
 
+_STOCK_QUERY_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "and",
+        "or",
+        "with",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "from",
+        "into",
+        "over",
+        "video",
+        "footage",
+        "stock",
+        "clip",
+        "scene",
+        "background",
+    }
+)
+
+
+def pixabay_tags_match_term(search_term: str, tags: Any) -> bool:
+    """Keep a Pixabay hit when its tags share a concrete query word.
+
+    Hits without tags stay eligible. Providers and older tests omit tags, and
+    treating that as unrelated would hide every previously accepted clip.
+    """
+    if isinstance(tags, str):
+        tag_text = tags.strip()
+    elif isinstance(tags, (list, tuple)):
+        tag_text = " ".join(str(tag) for tag in tags if tag is not None).strip()
+    else:
+        return True
+    if not tag_text:
+        return True
+
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", str(search_term or "").lower())
+        if len(token) > 2 and token not in _STOCK_QUERY_STOPWORDS
+    ]
+    if not tokens:
+        return True
+    tag_tokens = set(re.findall(r"[a-z0-9]+", tag_text.lower()))
+    if not tag_tokens:
+        return True
+    for token in tokens:
+        if token in tag_tokens:
+            return True
+        for tag in tag_tokens:
+            if len(tag) > 3 and (tag.startswith(token) or token.startswith(tag)):
+                return True
+    return False
+
+
+def _stock_usable_duration(items: List[MaterialInfo]) -> tuple[int, float]:
+    seen = set()
+    usable = 0.0
+    for item in items:
+        if not item.url or item.url in seen:
+            continue
+        seen.add(item.url)
+        try:
+            duration = float(item.duration)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0:
+            usable += duration
+    return len(seen), usable
+
+
+def stock_needs_landscape_fallback(
+    items: List[MaterialInfo],
+    audio_duration: float,
+    max_clip_duration: int,
+) -> bool:
+    """Portrait coverage is short when one clip would have to fill the narration."""
+    try:
+        required = float(audio_duration)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(required) or required <= 0:
+        return False
+    try:
+        clip_duration = max(1, int(max_clip_duration))
+    except (TypeError, ValueError):
+        clip_duration = 5
+    distinct, usable = _stock_usable_duration(items)
+    clips_needed = max(1, math.ceil(required / clip_duration))
+    need_distinct = min(japanese_support.stock_min_distinct_clips(), clips_needed)
+    return distinct < need_distinct or usable + 1e-6 < required
+
+
+def _copy_material_with_fallback(item: MaterialInfo) -> MaterialInfo:
+    source_info = dict(item.source_info) if isinstance(item.source_info, dict) else {}
+    source_info["aspect_fallback"] = "16:9"
+    return MaterialInfo(
+        provider=item.provider,
+        url=item.url,
+        duration=item.duration,
+        source_info=source_info,
+    )
+
+
+def _search_stock_term_groups(
+    search_terms: List[str],
+    search_videos: Callable[[str, int, VideoAspect], List[MaterialInfo]],
+    minimum_duration: int,
+    video_aspect: VideoAspect,
+    audio_duration: float,
+    source: str,
+) -> list[tuple[str, List[MaterialInfo]]]:
+    """Search the requested orientation, then 16:9 when portrait coverage is thin."""
+    primary = _search_terms_in_parallel(
+        search_terms=search_terms,
+        search_videos=search_videos,
+        minimum_duration=minimum_duration,
+        video_aspect=video_aspect,
+    )
+    aspect = VideoAspect(video_aspect)
+    if aspect != VideoAspect.portrait or not (
+        japanese_support.stock_portrait_landscape_fallback_enabled(source)
+    ):
+        return primary
+
+    found_items = [item for _, items in primary for item in items]
+    if not stock_needs_landscape_fallback(
+        found_items, audio_duration, minimum_duration
+    ):
+        return primary
+
+    distinct, usable = _stock_usable_duration(found_items)
+    logger.warning(
+        "portrait stock clips cannot cover the narration without heavy reuse: "
+        f"source={source}, clips={distinct}, usable={usable:.1f}s, "
+        f"required={float(audio_duration):.1f}s. "
+        "Searching 16:9 clips and center-cropping them into the portrait frame."
+    )
+    landscape_groups = _search_terms_in_parallel(
+        search_terms=search_terms,
+        search_videos=search_videos,
+        minimum_duration=minimum_duration,
+        video_aspect=VideoAspect.landscape,
+    )
+    merged = []
+    added = 0
+    for (search_term, items), (_, landscape_items) in zip(primary, landscape_groups):
+        seen = {item.url for item in items}
+        combined = list(items)
+        for item in landscape_items:
+            if not item.url or item.url in seen:
+                continue
+            combined.append(_copy_material_with_fallback(item))
+            seen.add(item.url)
+            added += 1
+        merged.append((search_term, combined))
+    if added:
+        logger.info(
+            f"added {added} landscape stock clips for center-crop fallback"
+        )
+    elif not any(items for _, items in merged):
+        logger.error(
+            "no stock clips matched the search terms after the portrait search "
+            "and the 16:9 center-crop fallback. Use concrete English keywords "
+            "such as 'morning coffee' or 'quiet street' instead of a Japanese "
+            "sentence or an abstract word such as 'message'."
+        )
+    return merged
+
+
 def search_videos_pixabay(
     search_term: str,
     minimum_duration: int,
@@ -463,6 +641,11 @@ def search_videos_pixabay(
         "per_page": 50,
         "key": api_key,
     }
+    # English keywords match Pixabay's English tags. Non-English queries keep
+    # the provider default so an explicit Japanese term is not forced through
+    # the English index.
+    if str(search_term or "").isascii():
+        params["lang"] = "en"
     query_url = f"https://pixabay.com/api/videos/?{urlencode(params)}"
     logger.info(
         f"searching videos on pixabay: term={search_term!r}, "
@@ -530,6 +713,14 @@ def search_videos_pixabay(
                 or not math.isfinite(duration)
                 or duration < minimum_duration
             ):
+                continue
+            if japanese_support.pixabay_require_tag_overlap() and (
+                not pixabay_tags_match_term(search_term, v.get("tags"))
+            ):
+                logger.info(
+                    "skipping off-topic pixabay clip: "
+                    f"term={search_term!r}, tags={v.get('tags')!r}"
+                )
                 continue
             video_files = v.get("videos")
             if not isinstance(video_files, dict):
@@ -2294,16 +2485,19 @@ def download_videos(
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
             progress_callback=progress_callback,
+            source=source,
         )
 
     valid_video_items = []
     valid_video_urls = []
     found_duration = 0.0
-    for search_term, video_items in _search_terms_in_parallel(
+    for _search_term, video_items in _search_stock_term_groups(
         search_terms=search_terms,
         search_videos=search_videos,
         minimum_duration=max_clip_duration,
         video_aspect=video_aspect,
+        audio_duration=audio_duration,
+        source=source,
     ):
         for item in video_items:
             if item.url not in valid_video_urls:
@@ -2950,6 +3144,7 @@ def _download_videos_by_script_order(
     max_clip_duration: int,
     material_directory: str,
     progress_callback: Callable[[float], None] | None = None,
+    source: str = "pexels",
 ) -> List[str]:
     """
     按脚本文案顺序下载素材。
@@ -2965,11 +3160,13 @@ def _download_videos_by_script_order(
     valid_video_urls = set()
     found_duration = 0.0
 
-    for search_term, video_items in _search_terms_in_parallel(
+    for search_term, video_items in _search_stock_term_groups(
         search_terms=search_terms,
         search_videos=search_videos,
         minimum_duration=max_clip_duration,
         video_aspect=video_aspect,
+        audio_duration=audio_duration,
+        source=source,
     ):
         term_items = []
         for item in video_items:

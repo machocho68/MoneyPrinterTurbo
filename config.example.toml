@@ -89,6 +89,39 @@ tls_verify = true
 # or cloud relays) and renders it into a video clip.
 video_source = "pexels"
 
+# Japanese narration and stock-footage fallback. These do not change English,
+# Chinese, or any request that sets its own voice_name and font_name.
+# 日语旁白和素材回退。已显式指定音色、字体的请求，以及非日语请求，保持原行为。
+#
+# When video_language is ja / ja-JP, or the language is empty and the subject
+# or script contains kana, the built-in default voice and fonts below are
+# replaced. POST /api/v1/videos stays compatible: an explicit voice such as
+# en-US-JennyNeural-Female is kept.
+japanese_voice_name = "ja-JP-NanamiNeural-Female"
+japanese_font_name = "NotoSansJP-Bold.ttf"
+# Voices and fonts treated as "unset" for Japanese narration. Remove an entry
+# to keep that exact value. An empty string covers API requests that omit voice.
+japanese_replace_voices = ["", "zh-CN-XiaoxiaoNeural-Female", "zh-CN-XiaoxiaoNeural"]
+japanese_replace_fonts = ["STHeitiMedium.ttc", "MicrosoftYaHeiBold.ttc"]
+# Translate Japanese stock queries into concrete English keywords such as
+# "morning coffee". English terms and non-Japanese narration are unchanged.
+translate_japanese_search_terms = true
+# Pixabay hits with tags must share a concrete word with the English query.
+# Clips that omit tags are still accepted. Set false to restore loose matching.
+pixabay_require_tag_overlap = true
+# When a portrait (9:16) Pexels, Pixabay, or Coverr search cannot cover the
+# narration with enough distinct clips, also search 16:9 footage. Those clips
+# are center-cropped when video_fit_mode is "cover" (the default).
+stock_portrait_landscape_fallback = true
+stock_landscape_fallback_sources = ["pexels", "pixabay", "coverr"]
+# How many different clips a long narration should find before fallback.
+# A 5 second narration with 5 second clips still accepts a single clip.
+stock_min_distinct_clips = 3
+# One source may be replayed this many times. Beyond that, generation fails
+# with an explicit error instead of looping the same clip for the whole video.
+# Several different clips may still repeat, but not back to back.
+stock_max_single_source_plays = 3
+
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
 # Key 必须使用英文半角双引号，多个 Key 使用英文逗号分隔。
@@ -761,8 +794,15 @@ open_task_folder_on_completion = true
 
 # The WebUI writes the remaining preferences automatically. Uncomment values
 # below only when you want to define initial defaults manually.
+# For a Japanese-first install, uncomment the next four lines. The [app]
+# japanese_* settings above still apply when a task is Japanese even if these
+# stay commented, and other languages keep the built-in defaults.
+# 日语优先时取消下面四行的注释。即使保持注释，日语任务仍会使用上方的
+# japanese_* 设置；其它语言继续使用内置默认值。
 # language = "zh"
-# video_language = ""
+# video_language = "ja-JP"
+# voice_name = "ja-JP-NanamiNeural-Female"
+# font_name = "NotoSansJP-Bold.ttf"
 # paragraph_number = 1
 # video_script_prompt = ""
 # custom_system_prompt = ""

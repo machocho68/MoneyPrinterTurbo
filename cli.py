@@ -499,7 +499,9 @@ Batch manifests:
         default=None,
         help=(
             f"TTS voice identifier. Defaults to [ui].voice_name from "
-            f"config.toml, otherwise {DEFAULT_VOICE_NAME}. A saved "
+            f"config.toml, otherwise {DEFAULT_VOICE_NAME}. "
+            "ja / ja-JP uses [app].japanese_voice_name when no voice is saved. "
+            "A saved "
             "[ui].voice_mode of 'none' or 'upload' resolves to no-voice "
             "instead, unless this option is given. "
             "Use 'no-voice' for silent output. Provider-specific identifiers "
@@ -902,7 +904,9 @@ def _resolve_subtitle_enabled(args: argparse.Namespace, ui_config) -> bool:
     return True if saved is None else saved
 
 
-def _resolve_voice_name(args: argparse.Namespace, ui_config) -> str:
+def _resolve_voice_name(
+    args: argparse.Namespace, ui_config, video_language: str = ""
+) -> str:
     """
     按优先级解析音色：命令行 > WebUI 保存的配音方式和音色 > 内置默认值。
 
@@ -919,7 +923,12 @@ def _resolve_voice_name(args: argparse.Namespace, ui_config) -> str:
     # 请求，因此两种模式都映射为 no-voice，需要配音时显式传 --voice-name。
     if _ui_config_value(ui_config, "voice_mode", str) in UI_VOICE_MODES_WITHOUT_TTS:
         return NO_VOICE_NAME
-    return _ui_config_value(ui_config, "voice_name", str) or DEFAULT_VOICE_NAME
+    saved_voice_name = _ui_config_value(ui_config, "voice_name", str)
+    if saved_voice_name:
+        return saved_voice_name
+    from app.services.japanese_support import default_voice_for_language
+
+    return default_voice_for_language(video_language) or DEFAULT_VOICE_NAME
 
 
 def build_video_params(args: argparse.Namespace) -> VideoParams:
@@ -946,6 +955,10 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
             if item.strip()
         ]
 
+    video_language = args.video_language
+    if not video_language:
+        video_language = _ui_config_value(ui_config, "video_language", str) or ""
+
     params_kwargs = {
         "video_subject": args.video_subject.strip(),
         "video_script": args.video_script,
@@ -954,7 +967,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_materials": video_materials,
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,
-        "voice_name": _resolve_voice_name(args, ui_config),
+        "voice_name": _resolve_voice_name(args, ui_config, video_language),
         "subtitle_enabled": _resolve_subtitle_enabled(args, ui_config),
     }
 

@@ -20,6 +20,7 @@ from app.services import bgm as bgm_service
 from app.services import (
     elevenlabs_music,
     infistar_video,
+    japanese_support,
     llm,
     loomloom,
     material,
@@ -409,6 +410,26 @@ def generate_terms(task_id, params, video_script):
             "terms",
             "failed to generate video search terms",
         )
+        return None
+
+    original_terms = list(video_terms)
+    video_terms = llm.ensure_english_stock_terms(
+        video_terms,
+        video_subject=params.video_subject,
+        video_script=video_script,
+        language=params.video_language or "",
+    )
+    if not video_terms:
+        detail = "failed to generate video search terms"
+        if japanese_support.narration_is_japanese(
+            params.video_language, params.video_subject, video_script
+        ):
+            detail = (
+                "failed to translate Japanese search terms into English stock "
+                f"keywords: {original_terms}. Use concrete visible words such as "
+                "'morning coffee' or 'quiet street'."
+            )
+        _mark_task_failed(task_id, "terms", detail)
         return None
 
     # 可选的 TwelveLabs Marengo 语义重排：未启用时返回原顺序，无任何副作用。
@@ -910,11 +931,26 @@ def get_video_materials(
             )
             return None
         if not downloaded_videos:
-            _mark_task_failed(
-                task_id,
-                "materials",
-                f"failed to download video materials from {params.video_source}",
+            message = (
+                f"failed to download video materials from {params.video_source}. "
+                "Not enough on-topic clips were found"
             )
+            if params.video_source in {"pexels", "pixabay", "coverr"}:
+                message += (
+                    ". Portrait searches also try 16:9 clips and center-crop "
+                    "them when stock_portrait_landscape_fallback is enabled"
+                )
+            if japanese_support.narration_is_japanese(
+                params.video_language,
+                params.video_subject,
+                getattr(params, "video_script", ""),
+            ):
+                message += (
+                    ". Japanese narration is searched with concrete English "
+                    "keywords such as 'morning coffee' or 'quiet street', not "
+                    "the original sentence"
+                )
+            _mark_task_failed(task_id, "materials", message + ".")
             return None
         return downloaded_videos
 
@@ -1536,6 +1572,9 @@ def _run_pipeline(
     voxcpm_prompt_text: str = "",
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    # 日语旁白在脚本生成前先补上默认音色和字体。显式传入的其它音色、字体
+    # 和非日语请求保持原样，避免改变 POST /api/v1/videos 的既有行为。
+    japanese_support.apply_japanese_narration_defaults(params)
     sm.state.update_task(
         task_id, state=const.TASK_STATE_PROCESSING, progress=5,
         failed_stage=None, error=None,
@@ -1690,6 +1729,9 @@ def _run_pipeline(
             else "failed to generate video script"
         )
         return _mark_task_failed(task_id, "script", error)
+
+    # 主题本身没有假名、语言也留空时，生成后的日语脚本仍应使用日语默认值。
+    japanese_support.apply_japanese_narration_defaults(params, script=video_script)
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
 

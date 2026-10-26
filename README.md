@@ -551,6 +551,10 @@ MoneyPrinterTurbo
 
 用于视频字幕的渲染，位于项目的 `resource/fonts` 目录下，你也可以放进去自己的字体。
 
+### 日语旁白
+
+日语任务会使用 `NotoSansJP-Bold.ttf` 和 Edge TTS 的 `ja-JP-NanamiNeural-Female`，并把检索词翻译成具体的英文关键词。竖屏素材不足时会补充 16:9 视频并居中裁剪，同一条素材默认最多重复 3 次，超出后会明确报错而不是静默循环。这些开关在 `config.example.toml` 的 `[app]` 中，且不会改变其它语言或已经指定音色、字体的 `POST /api/v1/videos` 请求。说明见 [README-ja.md](README-ja.md)。
+
 ## 常见问题 🤔
 
 <details>

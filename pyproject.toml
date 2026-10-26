@@ -87,13 +87,14 @@ skip_covered = true
 [tool.hatch.build.targets.wheel]
 packages = ["app", "webui"]
 
-# 字体保留中英文默认字体和越南语字体。两个大体积备用字重不进入安装包，
+# 字体保留中英文默认字体、日语字幕字体和越南语字体。两个大体积备用字重不进入安装包，
 # 避免 wheel 超过 PyPI 默认文件大小限制；源码版的字体文件保持原样。
 [tool.hatch.build.targets.wheel.force-include]
 "cli.py" = "app/cli.py"
 "config.example.toml" = "app/_assets/config.example.toml"
 "resource/fonts/STHeitiMedium.ttc" = "app/_assets/resource/fonts/STHeitiMedium.ttc"
 "resource/fonts/MicrosoftYaHeiBold.ttc" = "app/_assets/resource/fonts/MicrosoftYaHeiBold.ttc"
+"resource/fonts/NotoSansJP-Bold.ttf" = "app/_assets/resource/fonts/NotoSansJP-Bold.ttf"
 "resource/fonts/BeVietnamPro-Bold.ttf" = "app/_assets/resource/fonts/BeVietnamPro-Bold.ttf"
 "resource/fonts/BeVietnamPro-Medium.ttf" = "app/_assets/resource/fonts/BeVietnamPro-Medium.ttf"
 "resource/fonts/Charm-Bold.ttf" = "app/_assets/resource/fonts/Charm-Bold.ttf"
@@ -112,6 +113,7 @@ include = [
     "/uv.lock", "/LICENSE", "/docs/pypi-description.md", "/docs/packaging.md",
     "/test/services/test_packaging.py", "/resource/songs", "/resource/public",
     "/resource/fonts/STHeitiMedium.ttc", "/resource/fonts/MicrosoftYaHeiBold.ttc",
+    "/resource/fonts/NotoSansJP-Bold.ttf", "/resource/fonts/NotoSansJP-OFL.txt",
     "/resource/fonts/BeVietnamPro-Bold.ttf", "/resource/fonts/BeVietnamPro-Medium.ttf",
     "/resource/fonts/Charm-Bold.ttf", "/resource/fonts/Charm-Regular.ttf",
     "/resource/fonts/UTM Kabel KT.ttf",
