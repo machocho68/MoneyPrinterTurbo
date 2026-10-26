@@ -510,6 +510,36 @@ MoneyPrinterTurbo
 
 動画の字幕描画に使うフォントは、プロジェクトの `resource/fonts` ディレクトリにあります。独自のフォントを追加することもできます。
 
+### 日本語ナレーションとストック素材
+
+日本語の台本では、次の初期値を使います。`config.example.toml` の `[app]` で変更できます。英語や中国語のリクエスト、および音色・フォントを明示した `POST /api/v1/videos` は従来どおりです。
+
+- 字幕フォント: `NotoSansJP-Bold.ttf`（SIL Open Font License。ライセンスは `resource/fonts/NotoSansJP-OFL.txt`）
+- Edge TTS の声: `ja-JP-NanamiNeural-Female`
+- 台本言語: WebUI の Script Language に `ja-JP` を追加。言語を日本語に切り替えると、Edge TTS 利用時は七海の声と上記フォントに切り替わります
+- 検索語: 日本語のテーマや台本は、見えるものを表す英語のキーワード（例: `morning coffee`、`quiet street`）に翻訳してから Pixabay / Pexels / Coverr を検索します。抽象語や日本語の文のままでは一致しにくい素材になります
+- Pixabay: タグが検索語と重ならないクリップ（落ち着いた内容にネオン映像など）は捨てます。タグが無いクリップは残します
+- 縦動画が足りないとき: 16:9 のクリップを追加し、既定の `video_fit_mode = "cover"` で中央をクロップします。`contain` のときはレターボックスのままです
+- 同じクリップの連続使用: 別の素材があるときは同じソースを隣り合わせにしません。素材が 1 本だけのとき、既定では 3 回まで繰り返し、それを超えると黙ってループせずエラーにします
+
+WebUI を最初から日本語向けにする場合は、`config.toml` の `[ui]` で次を有効にします。
+
+```toml
+video_language = "ja-JP"
+voice_name = "ja-JP-NanamiNeural-Female"
+font_name = "NotoSansJP-Bold.ttf"
+```
+
+試す例（Pixabay の API キーは手元の `config.toml` にだけ書き、リポジトリには置かないでください）:
+
+```sh
+python cli.py \
+  --video-subject "静かな朝のコーヒー" \
+  --video-language ja-JP \
+  --video-source pixabay \
+  --video-aspect 9:16
+```
+
 ## よくある質問 🤔
 
 <details>

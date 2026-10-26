@@ -567,6 +567,10 @@ Background music for videos is located in the project's `resource/songs` directo
 Fonts for rendering video subtitles are located in the project's `resource/fonts` directory, and you can also add your
 own fonts.
 
+### Japanese narration
+
+Japanese tasks use `NotoSansJP-Bold.ttf` and the Edge TTS voice `ja-JP-NanamiNeural-Female`. Stock searches translate the script into concrete English keywords, drop Pixabay clips whose tags do not overlap those keywords, and fall back to 16:9 footage with a center crop when portrait clips cannot cover the narration. A single clip is not looped silently for the whole video. The switches live in `[app]` in `config.example.toml` and do not change other languages or a `POST /api/v1/videos` request that already sets its own voice and font. See [README-ja.md](README-ja.md).
+
 ## Common Questions 🤔
 
 <details>

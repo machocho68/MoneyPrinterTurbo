@@ -55,6 +55,7 @@ from app.services import (
     metaso_minimax,
     muapi,
     infistar_video,
+    japanese_support,
     ofox,
     subtitle,
     video,
@@ -1874,6 +1875,7 @@ support_locales = [
     "es-ES",
     "fr-FR",
     "it-IT",
+    "ja-JP",
     "ru-RU",
     "vi-VN",
     "th-TH",
@@ -2574,6 +2576,35 @@ def sync_script_order_concat_mode():
         VideoConcatMode.random.value,
     }:
         st.session_state[widget_key] = previous_mode
+
+
+def _follow_japanese_script_language(language: str) -> None:
+    """Switch the default Edge voice and subtitle font when the user picks Japanese.
+
+    The first render keeps a saved voice. A later change to ja-JP selects the
+    configured Japanese voice and font; changing the voice again after that
+    is left alone. Other languages are not rewritten.
+    """
+    previous = st.session_state.get("_followed_script_language")
+    if previous is None:
+        st.session_state["_followed_script_language"] = language
+        return
+    if previous == language:
+        return
+    st.session_state["_followed_script_language"] = language
+    if not japanese_support.is_japanese_language(language):
+        return
+
+    tts_server = config.ui.get("tts_server", "azure-tts-v1")
+    if tts_server in {"azure-tts-v1", "azure-tts-v2", ""}:
+        voice_name = japanese_support.configured_japanese_voice()
+        _set_stable_widget_value(f"speech_synthesis_select_{tts_server}", voice_name)
+        _set_runtime_config("ui", "voice_name", voice_name)
+
+    font_name = japanese_support.configured_japanese_font()
+    if japanese_support.font_file_exists(font_name):
+        _set_stable_widget_value("font_name_select", font_name)
+        _set_runtime_config("ui", "font_name", font_name)
 
 
 def reset_script_system_prompt():
@@ -5103,6 +5134,7 @@ def _render_script_settings(panel, params):
             )
             params.video_language = selected_language_code
             _set_runtime_config("ui", "video_language", params.video_language)
+            _follow_japanese_script_language(params.video_language)
 
             # 使用带 key 的局部容器限定折叠入口样式，保持 expander 的原生交互，
             # 同时避免样式误伤页面顶部的“基础设置”等其他折叠区域。

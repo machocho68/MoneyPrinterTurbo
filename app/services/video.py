@@ -42,6 +42,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
+from app.services import japanese_support
 from app.services.utils import video_effects
 from app.utils import file_security, logging_utils, utils
 from app.utils.subtitle_reader import moviepy_subtitles
@@ -294,6 +295,100 @@ def _prioritize_unique_source_clips(
         f"fallback clips: {len(overflow_items)}"
     )
     return primary_items + overflow_items
+
+
+def extend_clip_sequence(
+    clips: List[SubClippedVideoClip],
+    covered_duration: float,
+    required_duration: float,
+    max_single_source_plays: int | None = None,
+) -> tuple[List[SubClippedVideoClip], float]:
+    """Repeat footage until the narration is covered, without silent single-clip loops.
+
+    Several different sources may repeat, but the same source is not placed
+    next to itself when another source is available. One source may only be
+    replayed ``stock_max_single_source_plays`` times (default 3). Beyond that
+    the task fails with an explicit message instead of looping one clip for
+    the whole video.
+    """
+    duration = float(covered_duration)
+    if not clips or duration >= required_duration:
+        return list(clips), duration
+
+    plays = max_single_source_plays
+    if plays is None:
+        plays = japanese_support.stock_max_single_source_plays()
+    plays = max(1, int(plays))
+    base = list(clips)
+    sources = {clip.source_file_path for clip in base}
+    extended = list(base)
+
+    if len(sources) == 1:
+        base_duration = sum(float(clip.duration) for clip in base)
+        if base_duration <= 0:
+            raise RuntimeError(
+                "the only stock clip has no usable duration, so it cannot "
+                "cover the narration"
+            )
+        maximum_duration = base_duration * plays
+        if maximum_duration + 1e-6 < required_duration:
+            raise RuntimeError(
+                "only one stock clip is available "
+                f"({base_duration:.1f}s) but the narration needs "
+                f"{required_duration:.1f}s. Playing that clip {plays} times "
+                f"still only covers {maximum_duration:.1f}s. Refusing to loop "
+                "a single clip for the whole video. Use more specific English "
+                "search terms, keep the 16:9 center-crop fallback enabled, or "
+                "raise stock_max_single_source_plays in config.toml. "
+                "日本語のナレーションでは、具体的な英語の検索語を増やすか、"
+                "16:9 素材の中央クロップを有効にしてください。"
+            )
+        while duration < required_duration:
+            for clip in base:
+                extended.append(clip)
+                duration += float(clip.duration)
+                if duration >= required_duration:
+                    break
+        logger.warning(
+            "only one stock clip was long enough to use; repeating it "
+            f"up to {plays} times. covered={duration:.1f}s, "
+            f"required={required_duration:.1f}s"
+        )
+        return extended, duration
+
+    last_source = extended[-1].source_file_path
+    index = 0
+    guard = 0
+    guard_limit = max(8, len(base) * plays * 4)
+    while duration < required_duration and guard < guard_limit:
+        guard += 1
+        picked_offset = 0
+        for offset in range(len(base)):
+            candidate = base[(index + offset) % len(base)]
+            if candidate.source_file_path != last_source:
+                picked_offset = offset
+                break
+        clip = base[(index + picked_offset) % len(base)]
+        if clip.source_file_path == last_source:
+            break
+        index = (index + picked_offset + 1) % len(base)
+        extended.append(clip)
+        duration += float(clip.duration)
+        last_source = clip.source_file_path
+    if duration < required_duration:
+        raise RuntimeError(
+            "stock clips cannot cover the narration without reusing the same "
+            f"clip back to back (have {duration:.1f}s, need "
+            f"{required_duration:.1f}s). Add more English search terms or "
+            "enable the 16:9 center-crop fallback."
+        )
+    logger.warning(
+        "stock footage is shorter than the narration; repeating clips "
+        "without placing the same source back to back. "
+        f"covered={duration:.1f}s, required={required_duration:.1f}s, "
+        f"sources={len(sources)}"
+    )
+    return extended, duration
 
 
 def get_ffmpeg_binary():
@@ -1240,22 +1335,22 @@ def combine_videos(
                 )
             next_candidate_index = candidate_index
     
-    # loop processed clips until the video duration covers the audio duration and the small safety margin.
-    if video_duration < required_video_duration:
-        logger.warning(
-            f"video duration ({video_duration:.2f}s) is shorter than required duration "
-            f"({required_video_duration:.2f}s), looping clips to match audio length."
-        )
-        base_clips = processed_clips.copy()
-        for clip in itertools.cycle(base_clips):
-            if video_duration >= required_video_duration:
-                break
-            processed_clips.append(clip)
-            video_duration += clip.duration
+    # Repeat clips only when the narration is still uncovered. A single source
+    # stops after a small number of plays and reports why, instead of looping
+    # silently for the whole video.
+    if processed_clips and video_duration < required_video_duration:
+        try:
+            processed_clips, video_duration = extend_clip_sequence(
+                processed_clips,
+                video_duration,
+                required_video_duration,
+            )
+        except RuntimeError:
+            delete_files([clip.file_path for clip in processed_clips])
+            raise
         logger.info(
             f"video duration: {video_duration:.2f}s, audio duration: {audio_duration:.2f}s, "
-            f"required duration: {required_video_duration:.2f}s, "
-            f"looped {len(processed_clips)-len(base_clips)} clips"
+            f"required duration: {required_video_duration:.2f}s"
         )
      
     # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
@@ -1291,6 +1386,18 @@ def combine_videos(
             
     logger.info("video combining completed")
     return combined_video_path
+
+
+# 日文和中文都没有空格。句读之后、以及开括号之前，是比任意字符更自然的换行点。
+# 行首禁则覆盖日文的闭括号、拗音和促音，避免「。」或「っ」单独掉到下一行。
+_CJK_BREAK_AFTER = set("、。！？!?．，,：:；;」』）】〕〉》…")
+_CJK_BREAK_BEFORE = set("「『（【〔〈《")
+_LINE_END_FORBIDDEN = _CJK_BREAK_BEFORE
+_LINE_START_FORBIDDEN = set(
+    "，。！？；：、,.!?;:)]}）】》」』”’"
+    "．…・ー〜ゝゞ々"
+    "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ"
+)
 
 
 def wrap_text(text, max_width, font="Arial", fontsize=60):
@@ -1352,20 +1459,51 @@ def wrap_text(text, max_width, font="Arial", fontsize=60):
 
     def split_long_token(token):
         # 当一个 token 本身就超宽时（常见于中文无空格长句，或英文超长单词），
-        # 退化为字符级拆分。关键点是：检测到 candidate 超宽时，先提交上一个
-        # 仍然合法的 current，再把当前字符放入下一行，不能把超宽字符塞回上一行。
+        # 退化为字符级拆分。日文和中文优先在句读之后、开括号之前断开；
+        # 只有附近没有合适断点时，才按宽度硬切。超宽字符不能塞回上一行。
+        units = attached_text_units(token)
         lines = []
-        current = ""
-        for char in attached_text_units(token):
-            candidate = f"{current}{char}"
-            candidate_width, _ = get_text_size(candidate)
+        current: list[str] = []
+        last_preferred = 0
+
+        def remember_break(unit_list: list[str]) -> int:
+            preferred = 0
+            for index, unit in enumerate(unit_list):
+                if unit[-1] in _CJK_BREAK_AFTER:
+                    preferred = index + 1
+                if unit[0] in _CJK_BREAK_BEFORE and index > 0:
+                    preferred = index
+            return preferred
+
+        for char in units:
+            candidate = current + [char]
+            candidate_width, _ = get_text_size("".join(candidate))
             if candidate_width <= max_width or not current:
                 current = candidate
+                last_preferred = remember_break(current)
                 continue
-            lines.append(current)
-            current = char
+
+            break_at = 0
+            if last_preferred >= max(1, int(len(current) * 0.4)):
+                break_at = last_preferred
+            if break_at:
+                lines.append("".join(current[:break_at]))
+                current = current[break_at:]
+            else:
+                lines.append("".join(current))
+                current = []
+
+            candidate = current + [char]
+            candidate_width, _ = get_text_size("".join(candidate))
+            if candidate_width <= max_width or not current:
+                current = candidate
+            else:
+                if current:
+                    lines.append("".join(current))
+                current = [char]
+            last_preferred = remember_break(current)
         if current:
-            lines.append(current)
+            lines.append("".join(current))
         return lines
 
     lines = []
@@ -1394,13 +1532,25 @@ def wrap_text(text, max_width, font="Arial", fontsize=60):
     if current:
         lines.append(current)
 
-    line_start_punctuation = "，。！？；：、,.!?;:)]}）】》」』”’"
+    for index in range(len(lines) - 1):
+        # 开括号不应该留在行尾。下一行放得下时，把括号移到下一行开头。
+        previous_units = attached_text_units(lines[index])
+        if (
+            len(previous_units) > 1
+            and previous_units[-1][0] in _LINE_END_FORBIDDEN
+        ):
+            moved = previous_units[-1]
+            candidate = f"{moved}{lines[index + 1]}"
+            candidate_width, _ = get_text_size(candidate)
+            if candidate_width <= max_width:
+                lines[index] = "".join(previous_units[:-1])
+                lines[index + 1] = candidate
+
     for index in range(1, len(lines)):
-        # 中文长句按字符拆分时，最后一个句号、逗号等闭合标点可能被单独
-        # 放到下一行，导致字幕背景被异常撑高，视觉上像一个小点掉在正文
-        # 下方。这里在不重新设计换行算法的前提下，把上一行最后一个字
-        # 移到标点行前面，让标点跟随文字显示，兼容中英文常见闭合标点。
-        if not lines[index] or lines[index][0] not in line_start_punctuation:
+        # 中文和日文长句按字符拆分时，句号、顿号、闭括号或拗音可能被单独
+        # 放到下一行，导致字幕背景被一个小点撑高。把上一行最后一个字
+        # 移到这一行前面，让标点跟随文字。
+        if not lines[index] or lines[index][0] not in _LINE_START_FORBIDDEN:
             continue
         if len(lines[index - 1]) <= 1:
             continue
